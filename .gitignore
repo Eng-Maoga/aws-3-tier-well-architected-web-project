@@ -1,0 +1,9 @@
+﻿.env
+*.tfvars
+!*.tfvars.example
+*.tfstate
+*.tfstate.*
+.terraform/
+*.pem
+*.key
+*.log
