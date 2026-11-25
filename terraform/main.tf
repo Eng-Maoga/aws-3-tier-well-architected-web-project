@@ -1,4 +1,4 @@
-﻿resource "aws_vpc" "prod_3tier_vpc" {
+resource "aws_vpc" "prod_3tier_vpc" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
@@ -59,4 +59,142 @@ resource "aws_db_instance" "prod_mysql_db" {
   tags = {
     Name = "prod-mysql-db"
   }
+}
+
+resource "aws_subnet" "public_az" {
+  count                   = length(var.azs)
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidrs[count.index]
+  availability_zone       = var.azs[count.index]
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "prod-public-${var.azs[count.index]}"
+    Tier = "public"
+  }
+}
+
+resource "aws_subnet" "private_app_az" {
+  count             = length(var.azs)
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = var.private_app_subnet_cidrs[count.index]
+  availability_zone = var.azs[count.index]
+
+  tags = {
+    Name = "prod-private-app-${var.azs[count.index]}"
+    Tier = "app"
+  }
+}
+
+resource "aws_subnet" "private_db_az" {
+  count             = length(var.azs)
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = var.private_db_subnet_cidrs[count.index]
+  availability_zone = var.azs[count.index]
+
+  tags = {
+    Name = "prod-private-db-${var.azs[count.index]}"
+    Tier = "db"
+  }
+}
+
+resource "aws_db_subnet_group" "private_db_group" {
+  name       = "prod-mysql-private-subnets"
+  subnet_ids = aws_subnet.private_db_az[*].id
+
+  tags = {
+    Name = "prod-mysql-private-subnets"
+  }
+}
+
+resource "aws_sns_topic" "ops_alerts" {
+  name = "prod-3tier-ops-alerts"
+
+  tags = {
+    Name = "prod-3tier-ops-alerts"
+  }
+}
+
+resource "aws_sns_topic_subscription" "ops_email" {
+  topic_arn = aws_sns_topic.ops_alerts.arn
+  protocol  = "email"
+  endpoint  = var.alarm_notification_email
+}
+
+resource "aws_cloudwatch_metric_alarm" "alb_5xx" {
+  alarm_name          = "prod-web-alb-5xx-high"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  metric_name         = "HTTPCode_ELB_5XX_Count"
+  namespace           = "AWS/ApplicationELB"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = 5
+  alarm_description   = "Triggers when ALB returns 5 or more 5XX responses in 5 minutes"
+  alarm_actions       = [aws_sns_topic.ops_alerts.arn]
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    LoadBalancer = aws_lb.web.arn_suffix
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "rds_cpu" {
+  alarm_name          = "prod-mysql-db-cpu-high"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/RDS"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 80
+  alarm_description   = "Triggers when RDS average CPU exceeds 80% over 10 minutes"
+  alarm_actions       = [aws_sns_topic.ops_alerts.arn]
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    DBInstanceIdentifier = aws_db_instance.mysql.id
+  }
+}
+
+resource "aws_cloudwatch_dashboard" "three_tier_ops" {
+  dashboard_name = "prod-3tier-ops-dashboard"
+
+  dashboard_body = jsonencode({
+    widgets = [
+      {
+        type   = "metric"
+        x      = 0
+        y      = 0
+        width  = 12
+        height = 6
+        properties = {
+          region  = "us-east-1"
+          title   = "ALB Requests & 5XX Errors"
+          metrics = [
+            ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", aws_lb.web.arn_suffix],
+            [".", "HTTPCode_ELB_5XX_Count", ".", "."]
+          ]
+          period = 300
+          stat   = "Sum"
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 0
+        width  = 12
+        height = 6
+        properties = {
+          region  = "us-east-1"
+          title   = "RDS CPU Utilization (%)"
+          metrics = [
+            ["AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", aws_db_instance.mysql.id]
+          ]
+          period = 300
+          stat   = "Average"
+        }
+      }
+    ]
+  })
 }
